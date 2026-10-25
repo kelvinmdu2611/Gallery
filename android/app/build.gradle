@@ -1,0 +1,54 @@
+plugins {
+    id 'com.android.application'
+}
+
+def runNumber = (System.getenv('GITHUB_RUN_NUMBER') ?: '1').toInteger()
+// A private key from repo secrets wins; otherwise the shared key in android/signing
+// keeps every build signed the same way, so updates install over the old version.
+def privateKs = rootProject.file('release.jks')
+def keystore = privateKs.exists() ? privateKs : rootProject.file('signing/shared.jks')
+def ksPass = privateKs.exists() ? System.getenv('KS_PASS') : 'supergallery'
+
+android {
+    namespace 'com.kelvin.supergallery'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.kelvin.supergallery'
+        minSdk 29
+        targetSdk 34
+        versionCode runNumber
+        versionName "1.0.${runNumber}"
+    }
+
+    signingConfigs {
+        release {
+            storeFile keystore
+            storePassword ksPass
+            keyAlias 'supergallery'
+            keyPassword ksPass
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+
+    // The web app lives in /docs (also served by GitHub Pages) — bundle it as-is.
+    sourceSets {
+        main { assets.srcDirs = ['../../docs'] }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.11.0'
+    implementation 'androidx.core:core:1.13.1'
+}
