@@ -259,6 +259,8 @@ input{font:inherit;color:inherit}
     <div id="sbMain"></div>
     <div class="sb-head"><span>My Albums</span><button data-act="new-album" aria-label="New album"></button></div>
     <div id="sbAlbums"></div>
+    <div class="sb-head hidden" id="sbFoldersHead"><span>On This Tablet</span></div>
+    <div id="sbFolders"></div>
     <div class="sb-foot"><button class="sb-import" data-act="import"></button><div id="sbStorage"></div></div>
   </aside>
 
@@ -325,6 +327,8 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 const DAY = 864e5;
 const NATIVE = window.SGNative || null; // present inside the Android app
+const MEDIA_MODE = !!(NATIVE && NATIVE.load); // Android app: show the tablet's own photo library
+const EXT = new Map(); // files opened from other apps
 
 /* ---------- icons (hand-drawn set) ---------- */
 const IC = {
@@ -431,7 +435,7 @@ function groupBy(arr, fn) {
 }
 let toastT;
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 2200); }
-const isShot = m => /screen.?shot|scrnshot|screenrecord|screen_record/i.test(m.name);
+const isShot = m => m.bucket === 'Screenshots' || /screen.?shot|scrnshot|screenrecord|screen_record/i.test(m.name);
 const live = () => S.items.filter(m => !m.deleted);
 const albumById = id => S.albums.find(a => a.id === id);
 
@@ -534,6 +538,10 @@ function placeholderThumb() {
 /* ---------- object URL caches ---------- */
 const thumbURL = new Map();
 async function loadThumb(id) {
+  if (MEDIA_MODE) {
+    const m = S.byId.get(id) || EXT.get(id); if (!m) return null;
+    return m.ext ? m.thumb : `/thumb/${m.kind}/${m.mid}?s=448&v=${m.mod}`;
+  }
   if (thumbURL.has(id)) return thumbURL.get(id);
   const b = await DB.get('thumbs', id).catch(() => null);
   if (!b) return null;
@@ -542,6 +550,7 @@ async function loadThumb(id) {
 const previewURL = new Map();
 let previewBusy = 0; const previewQueue = [];
 function loadPreview(id) {
+  if (MEDIA_MODE) { const m = S.byId.get(id); return Promise.resolve(m ? `/thumb/${m.kind}/${m.mid}?s=1080&v=${m.mod}` : null); }
   if (previewURL.has(id)) return Promise.resolve(previewURL.get(id));
   return new Promise(res => { previewQueue.push({ id, res }); pumpPreview(); });
 }
@@ -573,7 +582,7 @@ const coverIO = new IntersectionObserver(es => {
     const img = e.target; coverIO.unobserve(img);
     const id = img.dataset.cover, m = S.byId.get(id);
     loadThumb(id).then(u => { if (u && !img.dataset.hi) { img.onload = () => img.classList.add('in'); img.src = u; } });
-    if (m && m.type === 'image') loadPreview(id).then(u => { if (u) { img.dataset.hi = 1; img.onload = () => img.classList.add('in'); img.src = u; } });
+    if (m && (m.type === 'image' || MEDIA_MODE)) loadPreview(id).then(u => { if (u) { img.dataset.hi = 1; img.onload = () => img.classList.add('in'); img.src = u; } });
   }
 }, { root: scroller, rootMargin: '600px 0px' });
 
@@ -617,7 +626,15 @@ async function importFiles(fileList) {
 function sortItems() { S.items.sort((a, b) => a.date - b.date || (a.name < b.name ? -1 : 1)); }
 
 /* ---------- persistence helpers ---------- */
-function saveMany(ms) { return DB.tx(['media'], t => { const o = t.objectStore('media'); ms.forEach(m => o.put(m)); }); }
+function saveMany(ms) {
+  return DB.tx(['media'], t => {
+    const o = t.objectStore('media');
+    ms.forEach(m => {
+      if (MEDIA_MODE) { const rec = { id: m.id, fav: !!m.fav, albums: m.albums || [] }; metaMap.set(m.id, rec); o.put(rec); }
+      else o.put(m);
+    });
+  });
+}
 async function purgeMany(ids) {
   await DB.tx(['media', 'blobs', 'thumbs'], t => { for (const id of ids) { t.objectStore('media').delete(id); t.objectStore('blobs').delete(id); t.objectStore('thumbs').delete(id); } });
   const set = new Set(ids);
@@ -631,7 +648,7 @@ function searchStr(m) {
   let s = searchCache.get(m); if (s) return s;
   const d = new Date(m.date);
   s = [m.name, MONTHS[d.getMonth()], MONTHS[d.getMonth()].slice(0, 3), d.getFullYear(), fmtWeekday(m.date), m.type === 'video' ? 'video videos' : 'photo photos',
-       m.fav ? 'favorite favourites favorites' : '', isShot(m) ? 'screenshot screenshots' : '', m.albums.map(a => albumById(a)?.name || '').join(' ')].join(' ').toLowerCase();
+       m.fav ? 'favorite favourites favorites' : '', isShot(m) ? 'screenshot screenshots' : '', m.bucket || '', m.albums.map(a => albumById(a)?.name || '').join(' ')].join(' ').toLowerCase();
   searchCache.set(m, s); return s;
 }
 function searchList(q) {
@@ -652,6 +669,7 @@ function listFor(v) {
     case 'recent': { const c = Date.now() - 30 * DAY; return live().filter(m => m.added > c); }
     case 'deleted': return S.items.filter(m => m.deleted).sort((a, b) => b.deleted - a.deleted);
     case 'album': return live().filter(m => m.albums.includes(v.id));
+    case 'folder': return live().filter(m => m.bucket === v.id);
     case 'onthisday': return onThisDay();
     case 'search': return searchList(S.query);
     default: return [];
@@ -684,7 +702,7 @@ function render(keepScroll) {
   content.classList.toggle('fit', S.fit);
 
   // header
-  $('#title').textContent = v.name === 'album' ? (albumById(v.id)?.name || 'Album') : TITLES[v.name];
+  $('#title').textContent = v.name === 'album' ? (albumById(v.id)?.name || 'Album') : v.name === 'folder' ? v.id : TITLES[v.name];
   $('#backBtn').classList.toggle('hidden', !S.stack.length);
   const isSearch = v.name === 'search';
   $('#searchBox').classList.toggle('hidden', !isSearch);
@@ -694,13 +712,14 @@ function render(keepScroll) {
   $('#selectBtn').classList.toggle('hidden', !gridView || !S.list.length);
   $('#selectBtn').textContent = S.selecting ? 'Cancel' : 'Select';
   $('#selectBtn').classList.toggle('on', S.selecting);
-  $('#libControls').classList.toggle('hidden', v.name !== 'library' || !S.items.length);
+  $('#libControls').classList.toggle('hidden', v.name !== 'library' || !live().length);
   $('#zoomCtl').classList.toggle('hidden', S.libMode !== 'all');
   document.querySelectorAll('#seg button').forEach(b => b.classList.toggle('on', b.dataset.mode === S.libMode));
 
   // body
   let scrollBottom = false;
-  if (v.name === 'library' && !S.items.length) renderEmpty();
+  if (MEDIA_MODE && S.loading) content.innerHTML = '';
+  else if (v.name === 'library' && !S.list.length && !(MEDIA_MODE && S.loading)) renderEmpty();
   else if (v.name === 'library' && S.libMode === 'years') { renderYears(S.list); scrollBottom = true; }
   else if (v.name === 'library' && S.libMode === 'months') { renderMonths(S.list); scrollBottom = true; }
   else if (v.name === 'albums') renderAlbums();
@@ -711,10 +730,24 @@ function render(keepScroll) {
   else if (scrollBottom) requestAnimationFrame(() => { scroller.scrollTop = scroller.scrollHeight; updateTitle(); });
   else scroller.scrollTop = 0;
 
-  renderSidebar(); renderTabs(); updateSelbar(); updateTitle();
+  renderSidebar(); renderSidebarFolders(); renderTabs(); updateSelbar(); updateTitle();
 }
 
 function renderEmpty() {
+  if (MEDIA_MODE) {
+    const art = '<div class="stack"><i></i><i></i><i></i></div>';
+    if (S.access === 'none') {
+      content.innerHTML = `<div class="empty">${art}
+        <h2>See every photo on this tablet.</h2>
+        <p>Allow Super Gallery to show your photos and videos. They stay exactly where they are — nothing is copied or uploaded.</p>
+        <div class="btns">${S.blocked ? `<button class="btn primary" data-act="open-settings">Open Settings</button>` : `<button class="btn primary" data-act="grant">Allow Access</button>`}</div>
+        ${S.blocked ? '<small>Access is turned off. In Settings, open <b>Permissions › Photos and videos</b> and choose <b>Allow all</b>.</small>' : ''}
+      </div>`;
+    } else {
+      content.innerHTML = `<div class="empty">${art}<h2>No photos yet.</h2><p>Photos and videos you take, download or receive will show up here on their own.</p></div>`;
+    }
+    return;
+  }
   content.innerHTML = `<div class="empty">
     <div class="stack"><i></i><i></i><i></i></div>
     <h2>Your photos, kept beautifully.</h2>
@@ -734,7 +767,7 @@ function renderGrid(list, deletedView) {
       favorites: ['No Favorites', 'Tap the heart on any photo to keep it here.'],
       videos: ['No Videos', 'Videos you import will appear here.'],
       screenshots: ['No Screenshots', 'Screenshots you import will appear here.'],
-      deleted: ['Nothing Deleted', 'Deleted items stay here for 30 days. Your original files on the tablet are never touched.'],
+      deleted: ['Nothing Deleted', MEDIA_MODE ? 'Deleted photos stay here for 30 days before they’re gone for good.' : 'Deleted items stay here for 30 days. Your original files on the tablet are never touched.'],
       album: ['Empty Album', 'Select photos in your Library and tap “Add to Album”.'],
       search: ['No Results', `Nothing matches “${S.query}”. Try a month, a year, or part of a file name.`],
       onthisday: ['Nothing Yet', 'Photos taken on this date in earlier years will show up here.'],
@@ -743,7 +776,9 @@ function renderGrid(list, deletedView) {
     content.innerHTML = `<div class="note"><b>${esc(msg[0])}</b>${esc(msg[1])}</div>`;
     return;
   }
-  const banner = deletedView ? `<div class="banner">Items are removed for good after 30 days. Removing them only affects Super Gallery — the original files on your tablet stay untouched.</div>` : '';
+  const banner = !deletedView ? '' : MEDIA_MODE
+    ? `<div class="banner">Deleted photos and videos wait in the tablet's trash for 30 days, then they're removed for good.</div>`
+    : `<div class="banner">Items are removed for good after 30 days. Removing them only affects Super Gallery — the original files on your tablet stay untouched.</div>`;
   const html = new Array(list.length);
   for (let i = 0; i < list.length; i++) html[i] = tileHTML(list[i], i, deletedView);
   content.innerHTML = `${banner}<div class="grid" id="grid">${html.join('')}</div>`;
@@ -783,8 +818,11 @@ function renderAlbums() {
       ${rc.length ? coverCard('', 'data-go="recent"', pickCover(rc), 'Recently Added', countStr(rc)) : ''}
     </div></section>`;
   }
+  const folders = MEDIA_MODE ? folderGroups(lv) : [];
+  const folderSec = folders.length ? `<section class="sec"><div class="sec-h"><h2>On This Tablet</h2></div><div class="agrid">${folders.map(([name, its]) =>
+    `<button class="acard" data-folder="${esc(name)}"><div class="acover"><img alt="" data-id="${its[its.length - 1].id}"></div><b>${esc(name)}</b><span>${its.length.toLocaleString()}</span></button>`).join('')}</div></section>` : '';
   const row = (go, ic, label, n) => `<button class="row" data-go="${go}">${icon(ic)}<span class="row-t">${label}</span><span class="row-c">${n.toLocaleString()}</span></button>`;
-  content.innerHTML = `${mem}
+  content.innerHTML = `${mem}${folderSec}
     <section class="sec"><div class="sec-h"><h2>My Albums</h2><button data-act="new-album">New Album</button></div>
       <div class="agrid">${cards}<button class="acard new" data-act="new-album"><div class="acover">${icon('plus')}</div><b>New Album</b><span>&nbsp;</span></button></div></section>
     <section class="sec"><div class="sec-h"><h2>Media Types</h2></div><div class="rows">
@@ -825,6 +863,19 @@ function renderSidebar() {
   $('#sbAlbums').innerHTML = S.albums.length ? S.albums.map(a =>
     `<button class="sb-item${v.name === 'album' && v.id === a.id ? ' on' : ''}" data-album="${a.id}" data-root="1">${icon('album')}<span>${esc(a.name)}</span><span class="cnt">${lv.filter(m => m.albums.includes(a.id)).length || ''}</span></button>`).join('')
     : `<div class="sb-item" style="color:var(--fg3);font-size:14px">No albums yet</div>`;
+}
+function folderGroups(list) {
+  const map = new Map();
+  for (const m of list) { const k = m.bucket || 'Other'; if (!map.has(k)) map.set(k, []); map.get(k).push(m); }
+  const rank = n => /^camera$/i.test(n) ? 0 : /^screenshots$/i.test(n) ? 1 : 2;
+  return [...map.entries()].sort((a, b) => rank(a[0]) - rank(b[0]) || b[1].length - a[1].length);
+}
+function renderSidebarFolders() {
+  const head = $('#sbFoldersHead'), box = $('#sbFolders');
+  if (!MEDIA_MODE) return;
+  const fs = folderGroups(live()).slice(0, 12), v = S.view;
+  head.classList.toggle('hidden', !fs.length);
+  box.innerHTML = fs.map(([name, its]) => `<button class="sb-item${v.name === 'folder' && v.id === name ? ' on' : ''}" data-folder="${esc(name)}" data-root="1">${icon('folder')}<span>${esc(name)}</span><span class="cnt">${its.length.toLocaleString()}</span></button>`).join('');
 }
 function renderTabs() {
   const n = S.view.name, root = S.stack.length ? S.stack[0].name : n;
@@ -933,11 +984,14 @@ async function selAct(a) {
     case 'sel-fav': { const val = !ms.every(m => m.fav); ms.forEach(m => m.fav = val); await saveMany(ms); toast(val ? 'Added to Favorites' : 'Removed from Favorites'); break; }
     case 'sel-remove': { const id = S.view.id; ms.forEach(m => m.albums = m.albums.filter(x => x !== id)); await saveMany(ms); break; }
     case 'sel-delete': {
+      if (MEDIA_MODE) { if (!await nativeTrash(ms, true)) return; break; }
       if (!await confirmSheet(`Delete ${plural(ms.length, 'Item')}?`, 'They move to Recently Deleted for 30 days. The original files on your tablet are not affected.', 'Delete')) return;
       const now = Date.now(); ms.forEach(m => m.deleted = now); await saveMany(ms); break;
     }
-    case 'sel-restore': ms.forEach(m => m.deleted = 0); await saveMany(ms); toast(`Recovered ${plural(ms.length, 'item')}`); break;
+    case 'sel-restore': if (MEDIA_MODE) { if (!await nativeTrash(ms, false)) return; toast(`Recovered ${plural(ms.length, 'item')}`); break; }
+      ms.forEach(m => m.deleted = 0); await saveMany(ms); toast(`Recovered ${plural(ms.length, 'item')}`); break;
     case 'sel-purge':
+      if (MEDIA_MODE) { if (!await nativeCall('remove', idsOf(ms))) return; await reloadNative(); break; }
       if (!await confirmSheet(`Delete ${plural(ms.length, 'Item')} for good?`, 'This removes them from Super Gallery permanently. Originals on your tablet stay untouched.', 'Delete Forever')) return;
       await purgeMany(ms.map(m => m.id)); storageInfo(); break;
   }
@@ -958,6 +1012,7 @@ async function nativeStage(file) {
   return tok;
 }
 async function shareItems(ms) {
+  if (MEDIA_MODE) { const ids = idsOf(ms); if (ids) NATIVE.shareIds(ids); return; }
   if (NATIVE) {
     try {
       if (ms.length > 30) { toast('Share up to 30 items at a time'); return; }
@@ -1060,6 +1115,16 @@ async function settingsSheet() {
   let est = null; try { est = await navigator.storage?.estimate(); } catch {}
   let persisted = false; try { persisted = await navigator.storage?.persisted(); } catch {}
   const lv = live(), total = lv.reduce((s, m) => s + (m.size || 0), 0);
+  if (MEDIA_MODE) {
+    openSheet(`<h2>Super Gallery</h2><p class="muted">${countStr(lv)} on this tablet · ${fmtBytes(total)}</p>
+      <div class="banner" style="margin:4px 0 0">${S.access === 'partial' ? 'You allowed only some photos. Tap “Allow More Photos” to show the rest.' : 'Showing every photo and video on this tablet. New ones appear automatically.'}</div>
+      <button class="switch-row" data-act="toggle-fit"><span>Aspect Ratio Grid</span><span class="sw${S.fit ? ' on' : ''}"></span></button>
+      ${S.access === 'partial' ? `<button class="big-opt" data-act="grant">${icon('photo')}<div><b>Allow More Photos</b><span>Choose “Allow all” to show everything</span></div></button>` : ''}
+      <button class="big-opt" data-act="refresh">${icon('restore')}<div><b>Refresh</b><span>Look for new photos now</span></div></button>
+      <button class="big-opt" data-act="open-settings">${icon('info')}<div><b>Photo Access</b><span>Change permission in Android settings</span></div></button>
+      <div class="sheet-btns"><button class="btn" data-act="sheet-cancel">Done</button></div>`);
+    return;
+  }
   const pct = est && est.quota ? Math.min(100, est.usage / est.quota * 100) : 0;
   openSheet(`<h2>Super Gallery</h2><p class="muted">${countStr(lv)} · ${fmtBytes(total)}</p>
     ${est ? `<div class="meter"><i style="width:${Math.max(1, pct)}%"></i></div><p class="muted" style="font-size:13px">Using ${fmtBytes(est.usage)} of ${fmtBytes(est.quota)} available to the app${persisted ? ' · protected from auto-cleanup' : ''}</p>` : ''}
@@ -1076,6 +1141,7 @@ function albumMenu() {
     <div class="sheet-btns"><button class="btn" data-act="sheet-cancel">Close</button></div>`);
 }
 async function storageInfo() {
+  if (MEDIA_MODE) { $('#sbStorage').textContent = live().length ? `${countStr(live())} on this tablet` : ''; return; }
   try {
     const e = await navigator.storage?.estimate(); if (!e) return;
     $('#sbStorage').textContent = `${fmtBytes(e.usage)} used on this tablet`;
@@ -1104,13 +1170,18 @@ function closeViewer(fromPop) {
   const cur = V.list[V.i];
   V.slides.forEach(s => { pauseIn(s); s.innerHTML = ''; s.style.transform = ''; s._tok = null; });
   for (const u of V.urls.values()) URL.revokeObjectURL(u); V.urls.clear();
-  if (S.dirty) { searchCache = new WeakMap(); render(true); S.dirty = false; }
+  if (S.needReload) { S.needReload = false; S.dirty = false; reloadNative(); }
+  else if (S.dirty) { searchCache = new WeakMap(); render(true); S.dirty = false; }
   if (cur) { const t = content.querySelector(`.tile[data-id="${cur.id}"]`); if (t) { const r = t.getBoundingClientRect(); if (r.top < 80 || r.bottom > innerHeight - 100) t.scrollIntoView({ block: 'center' }); } }
 }
 function layoutSlides() { V.slides.forEach((s, k) => { s.style.transform = `translateX(calc(${(k - 1) * 100}% + ${(k - 1) * GAP}px))`; }); }
 function fillAll() { V.slides.forEach((s, k) => fill(s, V.i + k - 1)); }
 function pauseIn(s) { const v = s.querySelector('video'); if (v) { try { v.pause(); } catch {} } }
 async function getFull(id) {
+  if (MEDIA_MODE) {
+    const m = S.byId.get(id) || EXT.get(id); if (!m) return null;
+    return m.ext ? m.src : `/media/${m.kind}/${m.mid}?m=${encodeURIComponent(m.mime || '')}`;
+  }
   if (V.urls.has(id)) return V.urls.get(id);
   const b = await DB.get('blobs', id); if (!b) return null;
   const u = URL.createObjectURL(b); V.urls.set(id, u); return u;
@@ -1136,11 +1207,17 @@ async function fill(slide, idx) {
   } else {
     const img = document.createElement('img'); img.className = 'media'; img.alt = ''; img.draggable = false;
     fitImg(img, m); slide.appendChild(img);
-    const t = await loadThumb(m.id); if (slide._tok !== tok) return; if (t) img.src = t;
+    const t = await loadThumb(m.id); if (slide._tok !== tok) return;
+    if (t) {
+      if (!m.w || !m.h) img.onload = () => { if (!m.w && img.naturalWidth) fitImg(img, { w: img.naturalWidth, h: img.naturalHeight }); };
+      img.src = t;
+    }
     const u = await getFull(m.id); if (slide._tok !== tok || !u) return;
     const pre = new Image(); pre.src = u;
     try { await pre.decode(); } catch {}
-    if (slide._tok === tok) img.src = u;
+    if (slide._tok !== tok) return;
+    if (pre.naturalWidth) { m.w = pre.naturalWidth; m.h = pre.naturalHeight; fitImg(img, m); }
+    img.onload = null; img.src = u;
   }
 }
 function curMedia() { return V.slides[1].querySelector('.media'); }
@@ -1279,6 +1356,7 @@ stage.addEventListener('wheel', e => {
 
 function updateViewerChrome() {
   const m = V.list[V.i]; if (!m) return;
+  if (m.ext) { $('#vDate').textContent = m.name || (m.type === 'video' ? 'Video' : 'Photo'); $('#vTime').textContent = ''; $('#vTools').innerHTML = ''; $('#vPlayBtn').classList.add('hidden'); return; }
   $('#vDate').textContent = fmtLong(m.date);
   $('#vTime').textContent = `${fmtWeekday(m.date)} · ${fmtTime(m.date)}`;
   $('#vPlayBtn').innerHTML = icon(V.show ? 'pause' : 'play');
@@ -1358,10 +1436,14 @@ async function viewerAct(a) {
       break;
     case 'v-album': pickAlbum([m]); break;
     case 'v-delete':
+      if (MEDIA_MODE) { if (!await nativeTrash([m], true, false)) return; m.deleted = Date.now(); S.needReload = true; removeFromViewer(); break; }
       if (!await confirmSheet(`Delete this ${m.type === 'video' ? 'video' : 'photo'}?`, 'It moves to Recently Deleted for 30 days. The original file on your tablet is not affected.', 'Delete')) return;
       m.deleted = Date.now(); await saveMany([m]); removeFromViewer(); break;
-    case 'v-restore': m.deleted = 0; await saveMany([m]); toast('Recovered'); removeFromViewer(); break;
+    case 'v-restore':
+      if (MEDIA_MODE) { if (!await nativeTrash([m], false, false)) return; m.deleted = 0; S.needReload = true; toast('Recovered'); removeFromViewer(); break; }
+      m.deleted = 0; await saveMany([m]); toast('Recovered'); removeFromViewer(); break;
     case 'v-purge':
+      if (MEDIA_MODE) { if (!await nativeCall('remove', idsOf([m]))) return; S.needReload = true; removeFromViewer(); break; }
       if (!await confirmSheet('Delete forever?', 'This removes it from Super Gallery permanently.', 'Delete Forever')) return;
       await purgeMany([m.id]); removeFromViewer(); storageInfo(); break;
   }
@@ -1371,7 +1453,7 @@ async function viewerAct(a) {
    EVENTS
    ========================================================= */
 document.addEventListener('click', async e => {
-  const el = e.target.closest('[data-act],[data-go],[data-album],[data-year],[data-month],[data-tab],[data-mode],[data-z],[data-q],[data-fi],.tile');
+  const el = e.target.closest('[data-act],[data-go],[data-album],[data-folder],[data-year],[data-month],[data-tab],[data-mode],[data-z],[data-q],[data-fi],.tile');
   if (!el) { if (e.target === $('#sheetWrap')) closeSheet(); return; }
   const d = el.dataset;
 
@@ -1403,6 +1485,7 @@ document.addEventListener('click', async e => {
     return;
   }
   if (d.album) { navigate({ name: 'album', id: d.album }, !!d.root); return; }
+  if (d.folder !== undefined) { navigate({ name: 'folder', id: d.folder }, !!d.root); return; }
   if (d.go) { navigate({ name: d.go }, !!d.root); return; }
 
   const a = d.act;
@@ -1410,6 +1493,9 @@ document.addEventListener('click', async e => {
   if (a.startsWith('sel-')) return selAct(a);
   switch (a) {
     case 'back': goBack(); break;
+    case 'grant': NATIVE && NATIVE.requestAccess(); closeSheet(); break;
+    case 'open-settings': NATIVE && NATIVE.openSettings(); closeSheet(); break;
+    case 'refresh': closeSheet(); await reloadNative(); toast(countStr(live())); break;
     case 'select': S.selecting ? exitSelect() : enterSelect(); break;
     case 'import': importSheet(); break;
     case 'pick-files': closeSheet(); $('#filePick').click(); break;
@@ -1493,10 +1579,10 @@ $('#dirPick').addEventListener('change', e => { const f = e.target.files; if (f 
 
 /* drag & drop (desktop) */
 let dragN = 0;
-addEventListener('dragenter', e => { if (e.dataTransfer?.types?.includes('Files')) { dragN++; $('#drop').classList.add('show'); } });
+addEventListener('dragenter', e => { if (MEDIA_MODE) return; if (e.dataTransfer?.types?.includes('Files')) { dragN++; $('#drop').classList.add('show'); } });
 addEventListener('dragleave', () => { if (--dragN <= 0) { dragN = 0; $('#drop').classList.remove('show'); } });
 addEventListener('dragover', e => e.preventDefault());
-addEventListener('drop', e => { e.preventDefault(); dragN = 0; $('#drop').classList.remove('show'); if (e.dataTransfer?.files?.length) importFiles(e.dataTransfer.files); });
+addEventListener('drop', e => { e.preventDefault(); if (MEDIA_MODE) return; dragN = 0; $('#drop').classList.remove('show'); if (e.dataTransfer?.files?.length) importFiles(e.dataTransfer.files); });
 
 /* keyboard */
 addEventListener('keydown', e => {
@@ -1536,11 +1622,126 @@ $('#tabbar').innerHTML = `<button data-tab="library">${icon('library')}Library</
 $('#vCloseBtn').innerHTML = icon('back');
 $('#vDlBtn').innerHTML = icon('download');
 
+/* =========================================================
+   DEVICE LIBRARY (Android app)
+   ========================================================= */
+const nativeCbs = {}; let nativeSeq = 0;
+let metaMap = new Map(), lastGen = null, reloading = null, resumeT = 0;
+window.SG_native = (type, a, b) => {
+  if (type === 'cb') { const f = nativeCbs[a]; delete nativeCbs[a]; if (f) f(b); }
+  else if (type === 'perm') { S.access = a; S.blocked = !!b && a === 'none'; if (a !== 'none') reloadNative(); else render(); }
+  else if (type === 'resume') onNativeResume();
+  else if (type === 'view') handleViewIntent();
+};
+function nativeCall(fn, ...args) {
+  return new Promise(res => {
+    const id = 'c' + (++nativeSeq); nativeCbs[id] = res;
+    try { NATIVE[fn](...args, id); } catch { delete nativeCbs[id]; res(false); }
+  });
+}
+const idsOf = ms => ms.filter(m => !m.ext && m.kind).map(m => m.kind + ':' + m.mid).join(',');
+async function nativeTrash(ms, value, reload = true) {
+  const ok = await nativeCall('trash', idsOf(ms), value);
+  if (ok && reload) await reloadNative();
+  return ok;
+}
+function fromRow(r, trashed) {
+  const [mid, mt, name, mime, taken, mod, added, w, h, dur, size, bucket, orient, exp] = r;
+  const kind = mt === 3 ? 'v' : 'i', id = kind + mid, meta = metaMap.get(id);
+  const swap = orient === 90 || orient === 270;
+  return {
+    id, mid, kind, name: name || 'Untitled', type: mt === 3 ? 'video' : 'image', mime: mime || '', size: size || 0,
+    date: taken > 0 ? taken : (mod || added) * 1000, added: (added || mod) * 1000, mod: mod || 0,
+    w: (swap ? h : w) || 0, h: (swap ? w : h) || 0, duration: (dur || 0) / 1000, bucket: bucket || 'Other',
+    fav: !!(meta && meta.fav), albums: meta && meta.albums ? [...meta.albums] : [],
+    deleted: trashed ? (exp ? exp * 1000 - 30 * DAY : Date.now()) : 0
+  };
+}
+async function reloadNative() {
+  if (reloading) return reloading;
+  reloading = (async () => {
+    S.access = NATIVE.access();
+    if (S.access === 'none') { S.items = []; S.byId = new Map(); render(); storageInfo(); return; }
+    const first = !S.items.length;
+    S.loading = first; if (first) render();
+    const data = await nativeCall('load');
+    S.loading = false;
+    if (!data || !data.items) { render(true); return; }
+    lastGen = data.gen;
+    const items = data.items.map(r => fromRow(r, false)).concat((data.trash || []).map(r => fromRow(r, true)));
+    S.items = items; S.byId = new Map(items.map(m => [m.id, m])); sortItems(); searchCache = new WeakMap();
+    if (S.view.name === 'folder' && !S.items.some(m => m.bucket === S.view.id)) { S.view = { name: 'albums' }; S.stack = []; }
+    if (S.selecting) exitSelect(false);
+    if ($('#viewer').classList.contains('open')) S.dirty = true; else render(!first);
+    storageInfo();
+  })();
+  try { await reloading; } finally { reloading = null; }
+}
+function onNativeResume() {
+  if (!S.booted) return;
+  clearTimeout(resumeT);
+  resumeT = setTimeout(() => {
+    const acc = NATIVE.access();
+    if (acc !== S.access) { reloadNative(); return; }
+    if (acc === 'none') return;
+    const g = NATIVE.generation();
+    if (g && g === lastGen) return;
+    if ($('#viewer').classList.contains('open') || S.selecting) { S.needReload = true; return; }
+    reloadNative();
+  }, 250);
+}
+function handleViewIntent() {
+  let j = null;
+  try { const s = NATIVE.takeViewIntent(); j = s ? JSON.parse(s) : null; } catch {}
+  if (!j) return;
+  if ($('#viewer').classList.contains('open')) closeViewer();
+  if (j.id) {
+    const m = S.byId.get((j.kind || 'i') + j.id) || S.byId.get('i' + j.id) || S.byId.get('v' + j.id);
+    if (m && !m.deleted) { const list = live(); S.list = list; openViewer(list, list.indexOf(m)); return; }
+  }
+  const isVideo = (j.mime || '').startsWith('video');
+  const src = `/ext?u=${encodeURIComponent(j.uri)}&m=${encodeURIComponent(j.mime || '')}`;
+  const m = { id: 'ext' + Date.now(), ext: true, name: '', type: isVideo ? 'video' : 'image', mime: j.mime || '', date: Date.now(), w: 0, h: 0, albums: [], src, thumb: isVideo ? '' : src };
+  EXT.set(m.id, m);
+  openViewer([m], 0);
+}
+async function nativeBoot() {
+  const recs = await DB.all('media').catch(() => []);
+  const legacy = recs.filter(r => r.type); // copies made by the first (import-based) version
+  recs.filter(r => !r.type).forEach(r => metaMap.set(r.id, r));
+  S.access = NATIVE.access();
+  if (S.access === 'none' && !store.get('asked', false)) { store.set('asked', true); NATIVE.requestAccess(); }
+  await reloadNative();
+  if (legacy.length) {
+    // keep favorites and album choices, then drop the duplicate copies
+    const byKey = new Map(S.items.map(m => [m.name + '|' + m.size, m]));
+    const moved = [];
+    for (const old of legacy) {
+      const m = byKey.get(old.name + '|' + old.size);
+      if (m && (old.fav || (old.albums && old.albums.length))) { m.fav = m.fav || old.fav; m.albums = [...new Set([...m.albums, ...(old.albums || [])])]; moved.push(m); }
+    }
+    try {
+      await DB.tx(['media', 'blobs', 'thumbs'], t => { legacy.forEach(o => t.objectStore('media').delete(o.id)); t.objectStore('blobs').clear(); t.objectStore('thumbs').clear(); });
+      if (moved.length) await saveMany(moved);
+    } catch {}
+    render(true);
+  }
+  S.booted = true;
+  handleViewIntent();
+}
+
 /* ---------- boot ---------- */
 (async function init() {
   if (!('indexedDB' in window)) { content.innerHTML = '<div class="note"><b>Storage unavailable</b>This browser can’t store photos offline.</div>'; return; }
   try { await DB.open(); }
   catch { content.innerHTML = '<div class="note"><b>Couldn’t open the library</b>Try closing other tabs of Super Gallery and reload.</div>'; return; }
+  if (MEDIA_MODE) {
+    S.cols = store.get('cols', 0) || autoCols(); S.libMode = store.get('mode', 'all'); S.fit = store.get('fit', false);
+    S.albums = (await DB.all('albums')).sort((a, b) => a.created - b.created);
+    ['#addBtn', '.sb-import', '#vDlBtn'].forEach(sel => { const el = $(sel); if (el) el.remove(); });
+    applyCols(); await nativeBoot();
+    return;
+  }
   S.items = await DB.all('media'); S.albums = (await DB.all('albums')).sort((a, b) => a.created - b.created);
   const cutoff = Date.now() - 30 * DAY;
   const expired = S.items.filter(m => m.deleted && m.deleted < cutoff).map(m => m.id);

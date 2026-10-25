@@ -8,7 +8,9 @@ A private, offline photo & video library for Android tablets, in the spirit of t
 - **Recently Deleted** — 30-day safety net (originals on the device are never touched)
 - **Search** — by month, year, file name or album
 
-Everything stays on the device (IndexedDB). Nothing is uploaded.
+**Android app:** shows every photo and video on the tablet automatically, straight from the system photo library — nothing is copied. Folders (Camera, Screenshots, WhatsApp…) appear under *On This Tablet*, deleting uses the tablet's own 30-day trash, and it registers as the device gallery so “Open with” and the camera's last-photo button open in Super Gallery.
+
+**Web version:** photos are imported into the browser (IndexedDB). Nothing is uploaded.
 
 ## Get it
 
