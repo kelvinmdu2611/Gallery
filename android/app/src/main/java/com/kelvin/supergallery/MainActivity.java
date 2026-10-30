@@ -61,7 +61,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Super Gallery — native shell around the web app in /docs.
+ * Kallery — native shell around the web app in /docs.
  *
  * The page is served from https://appassets.androidplatform.net. On top of the
  * bundled files, this activity answers three extra paths straight from the
@@ -609,6 +609,24 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public String takeViewIntent() { String s = viewIntent; viewIntent = null; return s == null ? "" : s; }
 
+        /** Play a library video in the native player. */
+        @JavascriptInterface
+        public void playVideo(String kind, String id) {
+            try {
+                Uri u = contentUri(kind, Long.parseLong(id));
+                runOnUiThread(() -> VideoActivity.play(MainActivity.this, u));
+            } catch (Exception ignored) {}
+        }
+
+        /** Play a video opened from another app. */
+        @JavascriptInterface
+        public void playUri(String uri) {
+            try {
+                Uri u = Uri.parse(uri);
+                runOnUiThread(() -> VideoActivity.play(MainActivity.this, u));
+            } catch (Exception ignored) {}
+        }
+
         @JavascriptInterface
         public void shareIds(String ids) {
             ArrayList<Uri> uris = parseIds(ids);
@@ -693,7 +711,7 @@ public class MainActivity extends Activity {
             ContentValues cv = new ContentValues();
             cv.put(MediaStore.MediaColumns.DISPLAY_NAME, st[1]);
             cv.put(MediaStore.MediaColumns.MIME_TYPE, st[2]);
-            cv.put(MediaStore.MediaColumns.RELATIVE_PATH, (video ? Environment.DIRECTORY_MOVIES : Environment.DIRECTORY_PICTURES) + "/Super Gallery");
+            cv.put(MediaStore.MediaColumns.RELATIVE_PATH, (video ? Environment.DIRECTORY_MOVIES : Environment.DIRECTORY_PICTURES) + "/Kallery");
             Uri coll = video ? MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
                              : MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
             ContentResolver cr = getContentResolver();

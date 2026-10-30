@@ -40,19 +40,19 @@ jobs:
         run: gradle assembleRelease --no-daemon --stacktrace
 
       - name: Rename
-        run: cp android/app/build/outputs/apk/release/app-release.apk SuperGallery.apk
+        run: cp android/app/build/outputs/apk/release/app-release.apk Kallery.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SuperGallery-apk
-          path: SuperGallery.apk
+          name: Kallery-apk
+          path: Kallery.apk
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest SuperGallery.apk \
-            --title "Super Gallery 1.0.${{ github.run_number }}" \
-            --notes "Download **SuperGallery.apk** below and open it on your tablet to install. Built from ${GITHUB_SHA::7}." \
+          gh release create latest Kallery.apk \
+            --title "Kallery 1.0.${{ github.run_number }}" \
+            --notes "Download **Kallery.apk** below and open it on your tablet to install. Built from ${GITHUB_SHA::7}." \
             --target "$GITHUB_SHA"
